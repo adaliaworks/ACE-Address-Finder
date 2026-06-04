@@ -1,29 +1,95 @@
-#!/usr/bin/env python3
-
+from flask import Flask, request, Response, render_template_string
 import csv
+import io
 import re
 import requests
-from pathlib import Path
+
+app = Flask(__name__)
 
 URL = "https://gcgis.guilfordcountync.gov/arcgis/rest/services/SiteStructureAddressPoints/FeatureServer/0/query"
 
+HTML = """
+<!doctype html>
+<html>
+<head>
+    <title>ACE Address Finder</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 700px;
+            margin: 50px auto;
+            padding: 20px;
+        }
 
-def safe_filename(text):
-    return re.sub(r"[^a-zA-Z0-9_-]+", "_", text).strip("_")
+        input, button {
+            width: 100%;
+            padding: 10px;
+            margin-top: 8px;
+            margin-bottom: 20px;
+            font-size: 16px;
+        }
+
+        button {
+            cursor: pointer;
+        }
+    </style>
+</head>
+<body>
+    <h1>ACE Address Finder</h1>
+
+    <form method="post" action="/download">
+        <label>Street Name(s)</label>
+        <input
+            type="text"
+            name="streets"
+            placeholder="Woodland Drive, Elm Street"
+            required
+        >
+
+        <label>ZIP Code</label>
+        <input
+            type="text"
+            name="zip_code"
+            placeholder="27408"
+            required
+        >
+
+        <button type="submit">
+            Download CSV
+        </button>
+    </form>
+</body>
+</html>
+"""
 
 
 def natural_sort_key(value):
-    return [int(p) if p.isdigit() else p.lower() for p in re.split(r"(\d+)", str(value))]
+    return [
+        int(p) if p.isdigit() else p.lower()
+        for p in re.split(r"(\d+)", str(value))
+    ]
 
 
 def split_street(street):
     parts = street.strip().split()
 
     street_types = {
-        "street", "st", "drive", "dr", "road", "rd", "avenue", "ave",
-        "lane", "ln", "court", "ct", "circle", "cir", "place", "pl",
-        "boulevard", "blvd", "way", "trail", "trl", "parkway", "pkwy",
-        "terrace", "ter", "loop", "pass", "alley", "aly"
+        "street", "st",
+        "drive", "dr",
+        "road", "rd",
+        "avenue", "ave",
+        "lane", "ln",
+        "court", "ct",
+        "circle", "cir",
+        "place", "pl",
+        "boulevard", "blvd",
+        "way",
+        "trail", "trl",
+        "parkway", "pkwy",
+        "terrace", "ter",
+        "loop",
+        "pass",
+        "alley", "aly"
     }
 
     if len(parts) > 1 and parts[-1].lower() in street_types:
@@ -34,22 +100,35 @@ def split_street(street):
 
 def normalize_type(st_type):
     mapping = {
-        "dr": "Drive", "drive": "Drive",
-        "st": "Street", "street": "Street",
-        "rd": "Road", "road": "Road",
-        "ave": "Avenue", "avenue": "Avenue",
-        "ln": "Lane", "lane": "Lane",
-        "ct": "Court", "court": "Court",
-        "cir": "Circle", "circle": "Circle",
-        "pl": "Place", "place": "Place",
-        "blvd": "Boulevard", "boulevard": "Boulevard",
+        "dr": "Drive",
+        "drive": "Drive",
+        "st": "Street",
+        "street": "Street",
+        "rd": "Road",
+        "road": "Road",
+        "ave": "Avenue",
+        "avenue": "Avenue",
+        "ln": "Lane",
+        "lane": "Lane",
+        "ct": "Court",
+        "court": "Court",
+        "cir": "Circle",
+        "circle": "Circle",
+        "pl": "Place",
+        "place": "Place",
+        "blvd": "Boulevard",
+        "boulevard": "Boulevard",
         "way": "Way",
-        "trl": "Trail", "trail": "Trail",
-        "pkwy": "Parkway", "parkway": "Parkway",
-        "ter": "Terrace", "terrace": "Terrace",
+        "trl": "Trail",
+        "trail": "Trail",
+        "pkwy": "Parkway",
+        "parkway": "Parkway",
+        "ter": "Terrace",
+        "terrace": "Terrace",
         "loop": "Loop",
         "pass": "Pass",
-        "aly": "Alley", "alley": "Alley",
+        "aly": "Alley",
+        "alley": "Alley",
     }
 
     return mapping.get(st_type.lower(), st_type.title())
@@ -61,7 +140,9 @@ def sql_escape(value):
 
 def fetch_addresses_for_street(street, zip_code):
     street_name, street_type = split_street(street)
-    street_type = normalize_type(street_type) if street_type else ""
+
+    if street_type:
+        street_type = normalize_type(street_type)
 
     where = (
         f"UPPER(St_Name) = '{sql_escape(street_name.upper())}' "
@@ -80,9 +161,10 @@ def fetch_addresses_for_street(street, zip_code):
         "orderByFields": "St_Name ASC, Add_Number ASC",
     }
 
-    r = requests.get(URL, params=params, timeout=60)
-    r.raise_for_status()
-    data = r.json()
+    response = requests.get(URL, params=params, timeout=60)
+    response.raise_for_status()
+
+    data = response.json()
 
     if "error" in data:
         raise RuntimeError(data["error"])
@@ -92,18 +174,12 @@ def fetch_addresses_for_street(street, zip_code):
     for feature in data.get("features", []):
         attrs = feature.get("attributes", {})
 
-        number = attrs.get("Add_Number", "")
-        name = attrs.get("St_Name", "")
-        street_type = attrs.get("St_PosTyp", "")
-        full_street = f"{name} {street_type}".strip()
+        full_address = attrs.get("FullAddress")
 
-        full_address = attrs.get("FullAddress") or f"{number} {full_street}".strip()
-
-        rows.append({
-            "street_number": number,
-            "street_name": full_street,
-            "full_address": full_address,
-        })
+        if full_address:
+            rows.append({
+                "full_address": full_address
+            })
 
     return rows
 
@@ -112,63 +188,68 @@ def fetch_addresses(streets, zip_code):
     all_rows = []
 
     for street in streets:
-        print(f"Querying {street}...")
-        rows = fetch_addresses_for_street(street, zip_code)
-        print(f"  Found {len(rows)} addresses.")
-        all_rows.extend(rows)
+        all_rows.extend(
+            fetch_addresses_for_street(street, zip_code)
+        )
 
     seen = set()
     deduped = []
 
     for row in all_rows:
         key = row["full_address"].upper()
+
         if key not in seen:
             seen.add(key)
             deduped.append(row)
 
     return sorted(
         deduped,
-        key=lambda r: (r["street_name"].lower(), natural_sort_key(r["street_number"]))
+        key=lambda r: natural_sort_key(r["full_address"])
     )
 
 
-def write_csv(rows, streets, zip_code):
-    street_part = safe_filename("_".join(streets))
-    path = Path(f"guilford_addresses_{street_part}_{zip_code}.csv")
-
-    with path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=["full_address"])
-        writer.writeheader()
-
-        for row in rows:
-            writer.writerow({"full_address": row["full_address"]})
-
-    return path
+@app.route("/")
+def index():
+    return render_template_string(HTML)
 
 
-def main():
-    street_input = input(
-        "Street name(s), comma-separated, e.g. Woodland Drive, Elm Street: "
-    ).strip()
+@app.route("/download", methods=["POST"])
+def download():
 
-    zip_code = input("ZIP code, e.g. 27408: ").strip()
+    streets_raw = request.form.get("streets", "")
+    zip_code = request.form.get("zip_code", "").strip()
 
-    streets = [s.strip() for s in street_input.split(",") if s.strip()]
-
-    if not streets or not zip_code:
-        raise SystemExit("At least one street name and ZIP code are required.")
+    streets = [
+        s.strip()
+        for s in streets_raw.split(",")
+        if s.strip()
+    ]
 
     rows = fetch_addresses(streets, zip_code)
 
-    if not rows:
-        print("No matching addresses found.")
-        return
+    output = io.StringIO()
 
-    output = write_csv(rows, streets, zip_code)
+    writer = csv.DictWriter(
+        output,
+        fieldnames=["full_address"]
+    )
 
-    print(f"Found {len(rows)} total unique addresses.")
-    print(f"Wrote CSV: {output}")
+    writer.writeheader()
+
+    for row in rows:
+        writer.writerow({
+            "full_address": row["full_address"]
+        })
+
+    return Response(
+        output.getvalue(),
+        mimetype="text/csv",
+        headers={
+            "Content-Disposition":
+                f"attachment; filename=addresses_{zip_code}.csv"
+        }
+    )
 
 
 if __name__ == "__main__":
-    main()
+    app.run(debug=True)
