@@ -9,7 +9,6 @@ from openpyxl import Workbook
 app = Flask(__name__)
 
 ADDRESS_URL = "https://gcgis.guilfordcountync.gov/arcgis/rest/services/SiteStructureAddressPoints/FeatureServer/0/query"
-PARCEL_URL = "https://gcgis.guilfordcountync.gov/arcgis/rest/services/Hosted/Parcel_Boundaries/FeatureServer/0/query"
 
 HTML = """
 <!doctype html>
@@ -18,7 +17,7 @@ HTML = """
     <title>Doors | Adalia Works</title>
     <link rel="icon" href="data:,">
     <style>
-        body { font-family: Arial, sans-serif; max-width: 900px; margin: 50px auto; padding: 20px; }
+        body { font-family: Arial, sans-serif; max-width: 850px; margin: 50px auto; padding: 20px; }
         h1 { margin-bottom: 5px; }
         .subtitle { color: #666; margin-bottom: 30px; }
         input, button { width: 100%; padding: 10px; margin-top: 8px; margin-bottom: 20px; font-size: 16px; box-sizing: border-box; }
@@ -70,8 +69,7 @@ HTML = """
                     <button type="button" onclick="copyAddresses()">Copy Addresses</button>
                 </div>
 
-                <textarea id="addressBox" readonly>full_address,owner_name
-{% for row in rows %}{{ row.full_address }},{{ row.owner_name }}
+                <textarea id="addressBox" readonly>{% for row in rows %}{{ row.full_address }}
 {% endfor %}</textarea>
             {% else %}
                 <p>No matching addresses found.</p>
@@ -82,7 +80,7 @@ HTML = """
     <footer>
         &copy; Adalia Works |
         <a href="https://adaliaworks.com" target="_blank" rel="noopener noreferrer">adaliaworks.com</a>
-        <small>Doors v0.6</small>
+        <small>Doors v0.51</small>
     </footer>
 
     <script>
@@ -187,41 +185,6 @@ def parse_list(raw):
     return [item.strip() for item in raw.split(",") if item.strip()]
 
 
-def fetch_owner_name_from_point(x, y):
-    if x is None or y is None:
-        return ""
-
-    params = {
-        "geometry": f"{x},{y}",
-        "geometryType": "esriGeometryPoint",
-        "inSR": "2264",
-        "spatialRel": "esriSpatialRelIntersects",
-        "outFields": "reid",
-        "returnGeometry": "false",
-        "f": "json",
-        "resultRecordCount": 1,
-    }
-
-    try:
-        response = requests.get(PARCEL_URL, params=params, timeout=30)
-        response.raise_for_status()
-        data = response.json()
-
-        features = data.get("features", [])
-        if not features:
-            return ""
-
-        attrs = features[0].get("attributes", {})
-        reid = attrs.get("reid", "")
-
-        # Owner-name lookup can be added here once we confirm the public tax-data endpoint/field names.
-        # For now, return the REID as a useful parcel reference if owner is unavailable.
-        return f"REID {reid}" if reid else ""
-
-    except Exception:
-        return ""
-
-
 def fetch_addresses_for_street_zip(street, zip_code=None):
     street_name, street_type = split_street(street)
 
@@ -239,8 +202,7 @@ def fetch_addresses_for_street_zip(street, zip_code=None):
     params = {
         "where": where,
         "outFields": "Add_Number,St_Name,St_PosTyp,Post_Code,FullAddress",
-        "returnGeometry": "true",
-        "outSR": "2264",
+        "returnGeometry": "false",
         "f": "json",
         "resultRecordCount": 2000,
         "orderByFields": "St_Name ASC, Add_Number ASC",
@@ -248,7 +210,6 @@ def fetch_addresses_for_street_zip(street, zip_code=None):
 
     response = requests.get(ADDRESS_URL, params=params, timeout=60)
     response.raise_for_status()
-
     data = response.json()
 
     if "error" in data:
@@ -258,20 +219,10 @@ def fetch_addresses_for_street_zip(street, zip_code=None):
 
     for feature in data.get("features", []):
         attrs = feature.get("attributes", {})
-        geometry = feature.get("geometry", {})
-
         full_address = attrs.get("FullAddress")
-        if not full_address:
-            continue
 
-        owner_name = fetch_owner_name_from_point(geometry.get("x"), geometry.get("y"))
-
-        rows.append(
-            {
-                "full_address": full_address,
-                "owner_name": owner_name,
-            }
-        )
+        if full_address:
+            rows.append({"full_address": full_address})
 
     return rows
 
@@ -300,7 +251,7 @@ def fetch_addresses(streets, zip_codes):
 
 def csv_response(rows):
     output = io.StringIO()
-    writer = csv.DictWriter(output, fieldnames=["full_address", "owner_name"])
+    writer = csv.DictWriter(output, fieldnames=["full_address"])
     writer.writeheader()
     writer.writerows(rows)
 
@@ -315,10 +266,10 @@ def xlsx_response(rows):
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "Addresses"
-    sheet.append(["full_address", "owner_name"])
+    sheet.append(["full_address"])
 
     for row in rows:
-        sheet.append([row["full_address"], row["owner_name"]])
+        sheet.append([row["full_address"]])
 
     output = io.BytesIO()
     workbook.save(output)
