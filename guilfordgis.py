@@ -4,6 +4,7 @@ import re
 
 import requests
 from flask import Flask, Response, render_template_string, request
+from openpyxl import Workbook
 
 app = Flask(__name__)
 
@@ -19,22 +20,20 @@ HTML = """
     <style>
         body {
             font-family: Arial, sans-serif;
-            max-width: 700px;
+            max-width: 850px;
             margin: 50px auto;
             padding: 20px;
             min-height: 80vh;
         }
 
-        h1 {
-            margin-bottom: 5px;
-        }
+        h1 { margin-bottom: 5px; }
 
         .subtitle {
             color: #666;
             margin-bottom: 30px;
         }
 
-        input, button {
+        input, select, button {
             width: 100%;
             padding: 10px;
             margin-top: 8px;
@@ -43,8 +42,30 @@ HTML = """
             box-sizing: border-box;
         }
 
-        button {
-            cursor: pointer;
+        button { cursor: pointer; }
+
+        .button-row {
+            display: flex;
+            gap: 10px;
+        }
+
+        .button-row button {
+            flex: 1;
+        }
+
+        .results {
+            margin-top: 30px;
+            padding: 20px;
+            border: 1px solid #ddd;
+            background: #fafafa;
+        }
+
+        textarea {
+            width: 100%;
+            height: 260px;
+            font-size: 14px;
+            padding: 10px;
+            box-sizing: border-box;
         }
 
         footer {
@@ -61,9 +82,7 @@ HTML = """
             text-decoration: none;
         }
 
-        footer a:hover {
-            text-decoration: underline;
-        }
+        footer a:hover { text-decoration: underline; }
 
         footer small {
             display: block;
@@ -81,39 +100,81 @@ HTML = """
         Powered by Guilford County GIS
     </div>
 
-    <form method="post" action="/download">
+    <form method="post" action="/">
 
         <label>Street Name(s)</label>
-
         <input
             type="text"
             name="streets"
             placeholder="Woodland Drive, Elm Street"
+            value="{{ streets_raw }}"
             required
         >
 
-        <label>ZIP Code</label>
-
+        <label>ZIP Code(s)</label>
         <input
             type="text"
-            name="zip_code"
-            placeholder="27408"
+            name="zip_codes"
+            placeholder="27408, 27410"
+            value="{{ zip_codes_raw }}"
             required
         >
 
         <button type="submit">
-            Download CSV
+            Preview Addresses
         </button>
 
     </form>
+
+    {% if searched %}
+        <div class="results">
+            <h2>{{ rows|length }} Addresses Found</h2>
+
+            {% if rows %}
+                <div class="button-row">
+                    <form method="post" action="/download">
+                        <input type="hidden" name="streets" value="{{ streets_raw }}">
+                        <input type="hidden" name="zip_codes" value="{{ zip_codes_raw }}">
+                        <input type="hidden" name="format" value="csv">
+                        <button type="submit">Download CSV</button>
+                    </form>
+
+                    <form method="post" action="/download">
+                        <input type="hidden" name="streets" value="{{ streets_raw }}">
+                        <input type="hidden" name="zip_codes" value="{{ zip_codes_raw }}">
+                        <input type="hidden" name="format" value="xlsx">
+                        <button type="submit">Download Excel</button>
+                    </form>
+
+                    <button type="button" onclick="copyAddresses()">
+                        Copy Addresses
+                    </button>
+                </div>
+
+                <textarea id="addressBox" readonly>{% for row in rows %}{{ row.full_address }}
+{% endfor %}</textarea>
+            {% else %}
+                <p>No matching addresses found.</p>
+            {% endif %}
+        </div>
+    {% endif %}
 
     <footer>
         &copy; Adalia Works |
         <a href="https://adaliaworks.com" target="_blank" rel="noopener noreferrer">
             adaliaworks.com
         </a>
-        <small>Doors v0.3</small>
+        <small>Doors v0.5</small>
     </footer>
+
+    <script>
+        function copyAddresses() {
+            const box = document.getElementById("addressBox");
+            box.select();
+            box.setSelectionRange(0, 999999);
+            navigator.clipboard.writeText(box.value);
+        }
+    </script>
 
 </body>
 </html>
@@ -207,7 +268,11 @@ def sql_escape(value):
     return value.replace("'", "''")
 
 
-def fetch_addresses_for_street(street, zip_code):
+def parse_list(raw):
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+def fetch_addresses_for_street_zip(street, zip_code):
     street_name, street_type = split_street(street)
 
     if street_type:
@@ -250,11 +315,12 @@ def fetch_addresses_for_street(street, zip_code):
     return rows
 
 
-def fetch_addresses(streets, zip_code):
+def fetch_addresses(streets, zip_codes):
     all_rows = []
 
     for street in streets:
-        all_rows.extend(fetch_addresses_for_street(street, zip_code))
+        for zip_code in zip_codes:
+            all_rows.extend(fetch_addresses_for_street_zip(street, zip_code))
 
     seen = set()
     deduped = []
@@ -269,34 +335,88 @@ def fetch_addresses(streets, zip_code):
     return sorted(deduped, key=lambda r: natural_sort_key(r["full_address"]))
 
 
-@app.route("/")
-def index():
-    return render_template_string(HTML)
-
-
-@app.route("/download", methods=["POST"])
-def download():
-    streets_raw = request.form.get("streets", "")
-    zip_code = request.form.get("zip_code", "").strip()
-
-    streets = [s.strip() for s in streets_raw.split(",") if s.strip()]
-
-    rows = fetch_addresses(streets, zip_code)
-
+def csv_response(rows, zip_codes):
     output = io.StringIO()
-
     writer = csv.DictWriter(output, fieldnames=["full_address"])
-
     writer.writeheader()
 
     for row in rows:
         writer.writerow({"full_address": row["full_address"]})
 
+    filename = f"doors_{'_'.join(zip_codes)}.csv"
+
     return Response(
         output.getvalue(),
         mimetype="text/csv",
-        headers={"Content-Disposition": f"attachment; filename=doors_{zip_code}.csv"},
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
     )
+
+
+def xlsx_response(rows, zip_codes):
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Addresses"
+
+    sheet.append(["full_address"])
+
+    for row in rows:
+        sheet.append([row["full_address"]])
+
+    output = io.BytesIO()
+    workbook.save(output)
+    output.seek(0)
+
+    filename = f"doors_{'_'.join(zip_codes)}.xlsx"
+
+    return Response(
+        output.getvalue(),
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+
+@app.route("/", methods=["GET", "POST"])
+def index():
+    rows = []
+    searched = False
+    streets_raw = ""
+    zip_codes_raw = ""
+
+    if request.method == "POST":
+        searched = True
+        streets_raw = request.form.get("streets", "").strip()
+        zip_codes_raw = request.form.get("zip_codes", "").strip()
+
+        streets = parse_list(streets_raw)
+        zip_codes = parse_list(zip_codes_raw)
+
+        if streets and zip_codes:
+            rows = fetch_addresses(streets, zip_codes)
+
+    return render_template_string(
+        HTML,
+        rows=rows,
+        searched=searched,
+        streets_raw=streets_raw,
+        zip_codes_raw=zip_codes_raw,
+    )
+
+
+@app.route("/download", methods=["POST"])
+def download():
+    streets_raw = request.form.get("streets", "")
+    zip_codes_raw = request.form.get("zip_codes", "")
+    output_format = request.form.get("format", "csv")
+
+    streets = parse_list(streets_raw)
+    zip_codes = parse_list(zip_codes_raw)
+
+    rows = fetch_addresses(streets, zip_codes)
+
+    if output_format == "xlsx":
+        return xlsx_response(rows, zip_codes)
+
+    return csv_response(rows, zip_codes)
 
 
 if __name__ == "__main__":
